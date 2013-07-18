@@ -9,6 +9,8 @@ std::vector<unsigned int> vPrimes;
 std::vector<unsigned int> vTwoInverses;
 static unsigned int nSieveSize = nDefaultSieveSize;
 
+static unsigned int int_invert(unsigned int a, unsigned int nPrime);
+
 void GeneratePrimeTable()
 {
     nSieveSize = (int)GetArg("-sievesize", nDefaultSieveSize);
@@ -32,18 +34,11 @@ void GeneratePrimeTable()
     //    printf(" %u", nPrime);
     printf("\n");
     
-    mpz_t p;
-    mpz_t mpzTwoInverse;
-    mpz_init(p);
-    mpz_init(mpzTwoInverse);
     const unsigned int nPrimes = vPrimes.size();
     vTwoInverses = std::vector<unsigned int> (nPrimes, 0);
     for (unsigned int nPrimeSeq = 1; nPrimeSeq < nPrimes; nPrimeSeq++)
     {
-        mpz_set_ui(p, vPrimes[nPrimeSeq]);
-        if (!mpz_invert(mpzTwoInverse, mpzTwo.get_mpz_t(), p))
-            printf("GeneratePrimeTable(): mpz_invert of 2 failed for prime #%u=%u", nPrimeSeq, vPrimes[nPrimeSeq]);
-        vTwoInverses[nPrimeSeq] = mpz_get_ui(mpzTwoInverse);
+        vTwoInverses[nPrimeSeq] = int_invert(2, vPrimes[nPrimeSeq]);
     }
 }
 
@@ -415,6 +410,7 @@ boost::thread_specific_ptr<CSieveOfEratosthenes> psieve;
 // Mine probable prime chain of form: n = h * p# +/- 1
 bool MineProbablePrimeChain(CBlock& block, mpz_class& mpzFixedMultiplier, bool& fNewBlock, unsigned int& nTriedMultiplier, unsigned int& nProbableChainLength, unsigned int& nTests, unsigned int& nPrimesHit, unsigned int& nChainsHit, mpz_class& mpzHash)
 {
+    CSieveOfEratosthenes *lpsieve;
     nProbableChainLength = 0;
     nTests = 0;
     nPrimesHit = 0;
@@ -427,31 +423,33 @@ bool MineProbablePrimeChain(CBlock& block, mpz_class& mpzFixedMultiplier, bool& 
     }
     fNewBlock = false;
 
-    int64 nStart, nCurrent; // microsecond timer
+    int64 nStart; // microsecond timer
     CBlockIndex* pindexPrev = pindexBest;
-    if (psieve.get() == NULL)
+    if ((lpsieve = psieve.get()) == NULL)
     {
         // Build sieve
         nStart = GetTimeMicros();
-        CSieveOfEratosthenes *lpsieve = new CSieveOfEratosthenes(nSieveSize, block.nBits, mpzHash, mpzFixedMultiplier, pindexPrev);
-        int64 nSieveRoundLimit = (int)GetArg("-gensieveroundlimitms", 1000);
-        while (lpsieve->Weave() && pindexPrev == pindexBest && (GetTimeMicros() - nStart < 1000 * nSieveRoundLimit));
+        lpsieve = new CSieveOfEratosthenes(nSieveSize, block.nBits, mpzHash, mpzFixedMultiplier, pindexPrev);
+        while (lpsieve->Weave() && pindexPrev == pindexBest);
         if (fDebug && GetBoolArg("-printmining"))
             printf("MineProbablePrimeChain() : new sieve (%u/%u@%u%%) ready in %uus\n", lpsieve->GetCandidateCount(), nSieveSize, lpsieve->GetProgressPercentage(), (unsigned int) (GetTimeMicros() - nStart));
         psieve.reset(lpsieve);
     }
 
     mpz_class mpzChainOrigin;
+    unsigned int nCandidates = lpsieve->GetCandidateCount();
 
     nStart = GetTimeMicros();
-    nCurrent = nStart;
 
-    while (nCurrent - nStart < 10000 && nCurrent >= nStart && pindexPrev == pindexBest)
+    // Process the sieve in 10 parts
+    while (nTests < (nCandidates + 9) / 10 && pindexPrev == pindexBest)
     {
         nTests++;
-        if (!psieve->GetNextCandidateMultiplier(nTriedMultiplier))
+        if (!lpsieve->GetNextCandidateMultiplier(nTriedMultiplier))
         {
             // power tests completed for the sieve
+            //if (fDebug && GetBoolArg("-printmining"))
+                //printf("MineProbablePrimeChain() : %u tests (%u primes and %u %d-chains) in %uus\n", nTests, nPrimesHit, nChainsHit, nStatsChainLength, (unsigned int) (GetTimeMicros() - nStart));
             psieve.reset();
             fNewBlock = true; // notify caller to change nonce
             return false;
@@ -476,10 +474,12 @@ bool MineProbablePrimeChain(CBlock& block, mpz_class& mpzFixedMultiplier, bool& 
             nPrimesHit++;
         if(TargetGetLength(nProbableChainLength) >= nStatsChainLength)
             nChainsHit++;
-
-        nCurrent = GetTimeMicros();
     }
-    return false; // stop as timed out
+    
+    //if (fDebug && GetBoolArg("-printmining"))
+        //printf("MineProbablePrimeChain() : %u tests (%u primes and %u %d-chains) in %uus\n", nTests, nPrimesHit, nChainsHit, nStatsChainLength, (unsigned int) (GetTimeMicros() - nStart));
+    
+    return false; // stop as new block arrived
 }
 
 // Check prime proof-of-work
@@ -598,6 +598,63 @@ unsigned int CSieveOfEratosthenes::GetProgressPercentage()
     return std::min(100u, (((nPrimeSeq >= vPrimes.size())? nSieveSize : vPrimes[nPrimeSeq]) * 100 / nSieveSize));
 }
 
+static unsigned int int_invert(unsigned int a, unsigned int nPrime)
+{
+    // Extended Euclidean algorithm to calculate the inverse of a in finite field defined by nPrime
+    int rem0 = nPrime, rem1 = a % nPrime, rem2;
+    int aux0 = 0, aux1 = 1, aux2;
+    int quotient, inverse;
+
+    while (1)
+    {
+        if (rem1 <= 1)
+        {
+            inverse = aux1;
+            break;
+        }
+
+        rem2 = rem0 % rem1;
+        quotient = rem0 / rem1;
+        aux2 = -quotient * aux1 + aux0;
+
+        if (rem2 <= 1)
+        {
+            inverse = aux2;
+            break;
+        }
+
+        rem0 = rem1 % rem2;
+        quotient = rem1 / rem2;
+        aux0 = -quotient * aux2 + aux1;
+
+        if (rem0 <= 1)
+        {
+            inverse = aux0;
+            break;
+        }
+
+        rem1 = rem2 % rem0;
+        quotient = rem2 / rem0;
+        aux1 = -quotient * aux0 + aux2;
+    }
+
+    return (inverse + nPrime) % nPrime;
+}
+
+void CSieveOfEratosthenes::AddMultiplier(unsigned int *vMultipliers, const unsigned int nSolvedMultiplier)
+{
+    // Eliminate duplicates
+    for (unsigned int i = 0; i < nHalfChainLength; i++)
+    {
+        unsigned int nStoredMultiplier = vMultipliers[i];
+        if (nStoredMultiplier == 0xFFFFFFFF || nStoredMultiplier == nSolvedMultiplier)
+        {
+            vMultipliers[i] = nSolvedMultiplier;
+            break;
+        }
+    }
+}
+
 // Weave sieve for the next prime in table
 // Return values:
 //   True  - weaved another prime; nComposite - number of composites removed
@@ -605,55 +662,63 @@ unsigned int CSieveOfEratosthenes::GetProgressPercentage()
 bool CSieveOfEratosthenes::Weave()
 {
     // Faster GMP version
-    const unsigned int nChainLength = TargetGetLength(nBits);
-    const unsigned int nHalfChainLength = (nChainLength + 1) / 2;
-    const unsigned int nTotalPrimes = vPrimes.size();
+    this->nChainLength = TargetGetLength(nBits);
+    this->nHalfChainLength = (nChainLength + 1) / 2;
 
     // Keep all variables local for max performance
+    const unsigned int nChainLength = this->nChainLength;
+    const unsigned int nHalfChainLength = this->nHalfChainLength;
     CBlockIndex* pindexPrev = this->pindexPrev;
     unsigned int nSieveSize = this->nSieveSize;
+    const unsigned int nTotalPrimes = vPrimes.size();
 
     // Process only 10% of the primes
     // Most composites are still found
     const unsigned int nPrimes = (uint64)nTotalPrimes * 10 / 100;
 
     mpz_t mpzFixedFactor; // fixed factor to derive the chain
-    mpz_t mpzFixedFactorMod;
-    mpz_t p;
-    mpz_t mpzFixedInverse;
 
     unsigned int vCunningham1AMultipliers[nPrimes][nHalfChainLength];
     unsigned int vCunningham1BMultipliers[nPrimes][nHalfChainLength];
     unsigned int vCunningham2AMultipliers[nPrimes][nHalfChainLength];
     unsigned int vCunningham2BMultipliers[nPrimes][nHalfChainLength];
-    
+
     mpz_init_set(mpzFixedFactor, this->mpzFixedFactor.get_mpz_t());
-    mpz_init(mpzFixedFactorMod);
-    mpz_init(p);
-    mpz_init(mpzFixedInverse);
-    
-    memset(vCunningham1AMultipliers, 0, sizeof(vCunningham1AMultipliers));
-    memset(vCunningham1BMultipliers, 0, sizeof(vCunningham1BMultipliers));
-    memset(vCunningham2AMultipliers, 0, sizeof(vCunningham2AMultipliers));
-    memset(vCunningham2BMultipliers, 0, sizeof(vCunningham2BMultipliers));
+
+    memset(vCunningham1AMultipliers, 0xFF, sizeof(vCunningham1AMultipliers));
+    memset(vCunningham1BMultipliers, 0xFF, sizeof(vCunningham1BMultipliers));
+    memset(vCunningham2AMultipliers, 0xFF, sizeof(vCunningham2AMultipliers));
+    memset(vCunningham2BMultipliers, 0xFF, sizeof(vCunningham2BMultipliers));
+
+    // bitsets that can be combined to obtain the final bitset of candidates
+    unsigned long *vfCompositeCunningham1A = (unsigned long *)malloc(nCandidatesBytes);
+    unsigned long *vfCompositeCunningham1B = (unsigned long *)malloc(nCandidatesBytes);
+    unsigned long *vfCompositeCunningham2A = (unsigned long *)malloc(nCandidatesBytes);
+    unsigned long *vfCompositeCunningham2B = (unsigned long *)malloc(nCandidatesBytes);
+
+    memset(vfCompositeCunningham1A, 0, nCandidatesBytes);
+    memset(vfCompositeCunningham1B, 0, nCandidatesBytes);
+    memset(vfCompositeCunningham2A, 0, nCandidatesBytes);
+    memset(vfCompositeCunningham2B, 0, nCandidatesBytes);
+
+    unsigned long *vfCandidates = this->vfCandidates;
 
     for (unsigned int nPrimeSeq = 1; nPrimeSeq < nPrimes; nPrimeSeq++)
     {
         if (pindexPrev != pindexBest)
             break;  // new block
         unsigned int nPrime = vPrimes[nPrimeSeq];
-        unsigned long nFixedFactorMod = mpz_tdiv_r_ui(mpzFixedFactorMod, mpzFixedFactor, nPrime);
+        unsigned int nFixedFactorMod = mpz_tdiv_ui(mpzFixedFactor, nPrime);
         if (nFixedFactorMod == 0)
         {
             // Nothing in the sieve is divisible by this prime
             continue;
         }
-        mpz_set_ui(p, nPrime);
         // Find the modulo inverse of fixed factor
-        if (!mpz_invert(mpzFixedInverse, mpzFixedFactorMod, p))
-            return error("CSieveOfEratosthenes::Weave(): mpz_invert of fixed factor failed for prime #%u=%u", nPrimeSeq, vPrimes[nPrimeSeq]);
-        unsigned long nFixedInverse = mpz_get_ui(mpzFixedInverse);
-        unsigned long nTwoInverse = vTwoInverses[nPrimeSeq];
+        unsigned int nFixedInverse = int_invert(nFixedFactorMod, nPrime);
+        if (!nFixedInverse)
+            return error("CSieveOfEratosthenes::Weave(): int_invert of fixed factor failed for prime #%u=%u", nPrimeSeq, vPrimes[nPrimeSeq]);
+        unsigned int nTwoInverse = vTwoInverses[nPrimeSeq];
 
         // Weave the sieve for the prime
         for (unsigned int nBiTwinSeq = 0; nBiTwinSeq < 2 * nChainLength; nBiTwinSeq++)
@@ -667,18 +732,18 @@ bool CSieveOfEratosthenes::Weave()
             if (nBiTwinSeq < nChainLength)
             {
                 if (((nBiTwinSeq & 1u) == 0))
-                    vCunningham1AMultipliers[nPrimeSeq][nBiTwinSeq / 2] = nSolvedMultiplier;
+                    AddMultiplier(vCunningham1AMultipliers[nPrimeSeq], nSolvedMultiplier);
                 else
-                    vCunningham2AMultipliers[nPrimeSeq][nBiTwinSeq / 2] = nSolvedMultiplier;
+                    AddMultiplier(vCunningham2AMultipliers[nPrimeSeq], nSolvedMultiplier);
             } else {
                 if (((nBiTwinSeq & 1u) == 0))
-                    vCunningham1BMultipliers[nPrimeSeq][(nBiTwinSeq - nChainLength) / 2] = nSolvedMultiplier;
+                    AddMultiplier(vCunningham1BMultipliers[nPrimeSeq], nSolvedMultiplier);
                 else
-                    vCunningham2BMultipliers[nPrimeSeq][(nBiTwinSeq - nChainLength) / 2] = nSolvedMultiplier;
+                    AddMultiplier(vCunningham2BMultipliers[nPrimeSeq], nSolvedMultiplier);
             }
         }
     }
-    
+
     // Number of elements that are likely to fit in L1 cache
     const unsigned int nL1CacheElements = 200000;
     const unsigned int nArrayRounds = (nSieveSize + nL1CacheElements - 1) / nL1CacheElements;
@@ -688,62 +753,33 @@ bool CSieveOfEratosthenes::Weave()
     {
         const unsigned int nMinMultiplier = nL1CacheElements * j;
         const unsigned int nMaxMultiplier = std::min(nL1CacheElements * (j + 1), nSieveSize);
-        
         if (pindexPrev != pindexBest)
             break;  // new block
-        
+
         for (unsigned int nPrimeSeq = 1; nPrimeSeq < nPrimes; nPrimeSeq++)
         {
             unsigned int nPrime = vPrimes[nPrimeSeq];
-            for (unsigned int i = 0; i < nHalfChainLength; i++)
-            {
-                unsigned int nVariableMultiplier = vCunningham1AMultipliers[nPrimeSeq][i];
-                if (nVariableMultiplier == 0) break;
-                for (; nVariableMultiplier < nMaxMultiplier; nVariableMultiplier += nPrime)
-                    vfCompositeCunningham1A[nVariableMultiplier] = true;
-                vCunningham1AMultipliers[nPrimeSeq][i] = nVariableMultiplier;
-            }
+            ProcessMultiplier(vfCompositeCunningham1A, nMinMultiplier, nMaxMultiplier, nPrime, vCunningham1AMultipliers[nPrimeSeq]);
         }
-        
+
         for (unsigned int nPrimeSeq = 1; nPrimeSeq < nPrimes; nPrimeSeq++)
         {
             unsigned int nPrime = vPrimes[nPrimeSeq];
-            for (unsigned int i = 0; i < nHalfChainLength; i++)
-            {
-                unsigned int nVariableMultiplier = vCunningham1BMultipliers[nPrimeSeq][i];
-                if (nVariableMultiplier == 0) break;
-                for (; nVariableMultiplier < nMaxMultiplier; nVariableMultiplier += nPrime)
-                    vfCompositeCunningham1B[nVariableMultiplier] = true;
-                vCunningham1BMultipliers[nPrimeSeq][i] = nVariableMultiplier;
-            }
+            ProcessMultiplier(vfCompositeCunningham1B, nMinMultiplier, nMaxMultiplier, nPrime, vCunningham1BMultipliers[nPrimeSeq]);
         }
-        
+
         for (unsigned int nPrimeSeq = 1; nPrimeSeq < nPrimes; nPrimeSeq++)
         {
             unsigned int nPrime = vPrimes[nPrimeSeq];
-            for (unsigned int i = 0; i < nHalfChainLength; i++)
-            {
-                unsigned int nVariableMultiplier = vCunningham2AMultipliers[nPrimeSeq][i];
-                if (nVariableMultiplier == 0) break;
-                for (; nVariableMultiplier < nMaxMultiplier; nVariableMultiplier += nPrime)
-                    vfCompositeCunningham2A[nVariableMultiplier] = true;
-                vCunningham2AMultipliers[nPrimeSeq][i] = nVariableMultiplier;
-            }
+            ProcessMultiplier(vfCompositeCunningham2A, nMinMultiplier, nMaxMultiplier, nPrime, vCunningham2AMultipliers[nPrimeSeq]);
         }
-        
+
         for (unsigned int nPrimeSeq = 1; nPrimeSeq < nPrimes; nPrimeSeq++)
         {
             unsigned int nPrime = vPrimes[nPrimeSeq];
-            for (unsigned int i = 0; i < nHalfChainLength; i++)
-            {
-                unsigned int nVariableMultiplier = vCunningham2BMultipliers[nPrimeSeq][i];
-                if (nVariableMultiplier == 0) break;
-                for (; nVariableMultiplier < nMaxMultiplier; nVariableMultiplier += nPrime)
-                    vfCompositeCunningham2B[nVariableMultiplier] = true;
-                vCunningham2BMultipliers[nPrimeSeq][i] = nVariableMultiplier;
-            }
+            ProcessMultiplier(vfCompositeCunningham2B, nMinMultiplier, nMaxMultiplier, nPrime, vCunningham2BMultipliers[nPrimeSeq]);
         }
-        
+
         // Combine all the bitsets
         // vfCompositeCunningham1 = vfCompositeCunningham1A | vfCompositeCunningham1B
         // vfCompositeCunningham2 = vfCompositeCunningham2A | vfCompositeCunningham2B
@@ -751,13 +787,13 @@ bool CSieveOfEratosthenes::Weave()
         // vfCandidates = ~(vfCompositeCunningham1 & vfCompositeCunningham2 & vfCompositeBiTwin)
         {
             // Fast version
-            const unsigned int nBytes = (nMaxMultiplier - nMinMultiplier) / 8;
-            unsigned long *lCandidates = (unsigned long *)&vfCandidates + (nMinMultiplier / 8 / sizeof(unsigned long));
-            unsigned long *lCompositeCunningham1A = (unsigned long *)&vfCompositeCunningham1A + (nMinMultiplier / 8 / sizeof(unsigned long));
-            unsigned long *lCompositeCunningham1B = (unsigned long *)&vfCompositeCunningham1B + (nMinMultiplier / 8 / sizeof(unsigned long));
-            unsigned long *lCompositeCunningham2A = (unsigned long *)&vfCompositeCunningham2A + (nMinMultiplier / 8 / sizeof(unsigned long));
-            unsigned long *lCompositeCunningham2B = (unsigned long *)&vfCompositeCunningham2B + (nMinMultiplier / 8 / sizeof(unsigned long));
-            const unsigned int nLongs = (nBytes + sizeof(unsigned long) + 1) / sizeof(unsigned long);
+            const unsigned int nBytes = (nMaxMultiplier - nMinMultiplier + 7) / 8;
+            unsigned long *lCandidates = (unsigned long *)vfCandidates + (nMinMultiplier / nWordBits);
+            unsigned long *lCompositeCunningham1A = (unsigned long *)vfCompositeCunningham1A + (nMinMultiplier / nWordBits);
+            unsigned long *lCompositeCunningham1B = (unsigned long *)vfCompositeCunningham1B + (nMinMultiplier / nWordBits);
+            unsigned long *lCompositeCunningham2A = (unsigned long *)vfCompositeCunningham2A + (nMinMultiplier / nWordBits);
+            unsigned long *lCompositeCunningham2B = (unsigned long *)vfCompositeCunningham2B + (nMinMultiplier / nWordBits);
+            const unsigned int nLongs = (nBytes + sizeof(unsigned long) - 1) / sizeof(unsigned long);
             for (unsigned int i = 0; i < nLongs; i++)
             {
                 lCandidates[i] = ~((lCompositeCunningham1A[i] | lCompositeCunningham1B[i]) &
@@ -766,14 +802,14 @@ bool CSieveOfEratosthenes::Weave()
             }
         }
     }
-    
+
     this->nPrimeSeq = nPrimes - 1;
-    
+
+    free(vfCompositeCunningham1A);
+    free(vfCompositeCunningham1B);
+    free(vfCompositeCunningham2A);
+    free(vfCompositeCunningham2B);
     mpz_clear(mpzFixedFactor);
-    mpz_clear(mpzFixedFactorMod);
-    mpz_clear(p);
-    mpz_clear(mpzFixedInverse);
-    
+
     return false;
 }
-

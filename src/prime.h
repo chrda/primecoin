@@ -94,20 +94,44 @@ class CSieveOfEratosthenes
     unsigned int nSieveSize; // size of the sieve
     unsigned int nBits; // target of the prime chain to search for
     mpz_class mpzFixedFactor; // fixed factor to derive the chain
-    
-    // bitsets that can be combined to obtain the final bitset of candidates
-    std::bitset<nMaxSieveSize> vfCompositeCunningham1A;
-    std::bitset<nMaxSieveSize> vfCompositeCunningham1B;
-    std::bitset<nMaxSieveSize> vfCompositeCunningham2A;
-    std::bitset<nMaxSieveSize> vfCompositeCunningham2B;
 
     // final set of candidates for probable primality checking
-    std::bitset<nMaxSieveSize> vfCandidates;
+    unsigned long *vfCandidates;
+    
+    static const unsigned int nWordBits = 8 * sizeof(unsigned long);
+    unsigned int nCandidatesWords;
+    unsigned int nCandidatesBytes;
 
     unsigned int nPrimeSeq; // prime sequence number currently being processed
+    unsigned int nCandidateCount; // cached total count of candidates
     unsigned int nCandidateMultiplier; // current candidate for power test
     
+    unsigned int nChainLength;
+    unsigned int nHalfChainLength;
+    
     CBlockIndex* pindexPrev;
+    
+    unsigned int GetWordNum(unsigned int nBitNum) {
+        return nBitNum / nWordBits;
+    }
+    
+    unsigned long GetBitMask(unsigned int nBitNum) {
+        return 1UL << (nBitNum % nWordBits);
+    }
+    
+    void AddMultiplier(unsigned int *vMultipliers, const unsigned int nSolvedMultiplier);
+
+    void ProcessMultiplier(unsigned long *vfComposites, const unsigned int nMinMultiplier, const unsigned int nMaxMultiplier, const unsigned int nPrime, unsigned int *vMultipliers)
+    {
+        for (unsigned int i = 0; i < nHalfChainLength; i++)
+        {
+            unsigned int nVariableMultiplier = vMultipliers[i];
+            if (nVariableMultiplier == 0xFFFFFFFF) break;
+            for (; nVariableMultiplier < nMaxMultiplier; nVariableMultiplier += nPrime)
+                vfComposites[GetWordNum(nVariableMultiplier)] |= GetBitMask(nVariableMultiplier);
+            vMultipliers[i] = nVariableMultiplier;
+        }
+    }
 
 public:
     CSieveOfEratosthenes(unsigned int nSieveSize, unsigned int nBits, mpz_class& mpzHash, mpz_class& mpzFixedMultiplier, CBlockIndex* pindexPrev)
@@ -117,18 +141,43 @@ public:
         this->mpzFixedFactor = mpzFixedMultiplier * mpzHash;
         this->pindexPrev = pindexPrev;
         nPrimeSeq = 0;
+        nCandidateCount = 0;
         nCandidateMultiplier = 0;
+        nCandidatesWords = (nSieveSize + nWordBits - 1) / nWordBits;
+        nCandidatesBytes = nCandidatesWords * sizeof(unsigned long);
+        vfCandidates = (unsigned long *)malloc(nCandidatesBytes);
+        memset(vfCandidates, 0, nCandidatesBytes);
+    }
+    
+    ~CSieveOfEratosthenes()
+    {
+        free(vfCandidates);
     }
 
     // Get total number of candidates for power test
     unsigned int GetCandidateCount()
     {
+        if (nCandidateCount)
+            return nCandidateCount;
+
         unsigned int nCandidates = 0;
-        for (unsigned int nMultiplier = 0; nMultiplier < nSieveSize; nMultiplier++)
+#ifdef __GNUC__
+        for (unsigned int i = 0; i < nCandidatesWords; i++)
         {
-            if (vfCandidates[nMultiplier])
-                nCandidates++;
+            nCandidates += __builtin_popcountl(vfCandidates[i]);
         }
+#else
+        for (unsigned int i = 0; i < nCandidatesWords; i++)
+        {
+            unsigned long lBits = vfCandidates[i];
+            for (unsigned int j = 0; j < nWordBits; j++)
+            {
+                nCandidates += (lBits & 1UL);
+                lBits >>= 1;
+            }
+        }
+#endif
+        nCandidateCount = nCandidates;
         return nCandidates;
     }
 
@@ -146,7 +195,7 @@ public:
                 nCandidateMultiplier = 0;
                 return false;
             }
-            if (vfCandidates[nCandidateMultiplier])
+            if (vfCandidates[GetWordNum(nCandidateMultiplier)] & GetBitMask(nCandidateMultiplier))
             {
                 nVariableMultiplier = nCandidateMultiplier;
                 return true;
