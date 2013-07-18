@@ -168,6 +168,8 @@ public:
     CCheckQueueControl(CCheckQueue<T> *pqueueIn) : pqueue(pqueueIn), fDone(false) {
         // passed queue is supposed to be unused, or NULL
         if (pqueue != NULL) {
+			free(pqueue);
+			pqueue = NULL;
 			std::cout << "WARNING: SHOULD NORMALLY ASSERT HERE, BUT WE CONTINUE ON AND CROSS OUR FINGERS! FREM MED FINGEREN CHRISTIAN!!!";
             //assert(pqueue->nTotal == pqueue->nIdle);
             //assert(pqueue->nTodo == 0);
