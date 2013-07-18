@@ -168,7 +168,7 @@ public:
     CCheckQueueControl(CCheckQueue<T> *pqueueIn) : pqueue(pqueueIn), fDone(false) {
         // passed queue is supposed to be unused, or NULL
         if (pqueue != NULL) {
-			cout << "WARNING: SHOULD NORMALLY ASSERT HERE, BUT WE CONTINUE ON AND CROSS OUR FINGERS! FREM MED FINGEREN CHRISTIAN!!!";
+			std::cout << "WARNING: SHOULD NORMALLY ASSERT HERE, BUT WE CONTINUE ON AND CROSS OUR FINGERS! FREM MED FINGEREN CHRISTIAN!!!";
             //assert(pqueue->nTotal == pqueue->nIdle);
             //assert(pqueue->nTodo == 0);
             //assert(pqueue->fAllOk == true);
