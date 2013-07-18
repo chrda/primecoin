@@ -11,6 +11,10 @@
 #include <vector>
 #include <algorithm>
 
+#include <iostream>
+#include <string>
+using namespace std;
+
 template<typename T> class CCheckQueueControl;
 
 /** Queue for verifications that have to be performed.
