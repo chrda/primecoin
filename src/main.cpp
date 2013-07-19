@@ -19,6 +19,8 @@
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
 
+#include <pthread.h>
+
 using namespace std;
 using namespace boost;
 
@@ -4566,8 +4568,12 @@ bool CheckWork(CBlock* pblock, CWallet& wallet, CReserveKey& reservekey)
     return true;
 }
 
-void static BitcoinMiner(CWallet *pwallet)
+//void static BitcoinMiner(CWallet *pwallet)
+void*  BitcoinMiner(void *pwallet_inst)
 {
+
+    CWallet *pwallet = (CWallet*) pwallet_inst;
+
     printf("PrimecoinMiner started\n");
     SetThreadPriority(THREAD_PRIORITY_LOWEST);
     RenameThread("primecoin-miner");
@@ -4594,7 +4600,7 @@ void static BitcoinMiner(CWallet *pwallet)
 
         auto_ptr<CBlockTemplate> pblocktemplate(CreateNewBlock(reservekey));
         if (!pblocktemplate.get())
-            return;
+            return NULL;
         CBlock *pblock = &pblocktemplate->block;
         IncrementExtraNonce(pblock, pindexPrev, nExtraNonce);
 
@@ -4754,8 +4760,9 @@ void static BitcoinMiner(CWallet *pwallet)
         printf("PrimecoinMiner terminated\n");
         throw;
     }
+    return NULL;
 }
-
+/*
 void GenerateBitcoins(bool fGenerate, CWallet* pwallet)
 {
     static boost::thread_group* minerThreads = NULL;
@@ -4777,6 +4784,34 @@ void GenerateBitcoins(bool fGenerate, CWallet* pwallet)
     minerThreads = new boost::thread_group();
     for (int i = 0; i < nThreads; i++)
         minerThreads->create_thread(boost::bind(&BitcoinMiner, pwallet));
+}
+*/
+
+void GenerateBitcoins(bool fGenerate, CWallet* pwallet)
+{
+
+    int nThreads = GetArg("-genproclimit", -1);
+    if (nThreads < 0)
+        nThreads = boost::thread::hardware_concurrency();
+
+
+    if (nThreads == 0 || !fGenerate)
+        return;
+
+    pthread_t minerThreads[100];
+
+    int rc = 0;
+
+    for (int i = 0; i < nThreads; i++) {
+        rc = pthread_create( &minerThreads[i], NULL, BitcoinMiner,
+                                                        (void*) pwallet);
+        assert (0 == rc);
+    }
+
+    for (int i = 0; i < nThreads; i++) {
+        rc = pthread_join( minerThreads[i], NULL);
+        assert (0 == rc);
+    }
 }
 
 // Amount compression:
