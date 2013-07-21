@@ -72,6 +72,7 @@ CScript COINBASE_FLAGS;
 const string strMessageMagic = "Primecoin Signed Message:\n";
 
 double dPrimesPerSec = 0.0;
+double dChainsPerMinute = 0.0;
 int64 nHPSTimerStart = 0;
 
 // Settings
@@ -1124,10 +1125,7 @@ unsigned int static GetNextWorkRequired(const CBlockIndex* pindexLast, const CBl
 
 bool CheckProofOfWork(uint256 hashBlockHeader, unsigned int nBits, const CBigNum& bnProbablePrime, unsigned int& nChainType, unsigned int& nChainLength)
 {
-    char *strProbablePrime = BN_bn2hex(&bnProbablePrime);
-    mpz_class mpzProbablePrime(strProbablePrime, 16);
-    OPENSSL_free(strProbablePrime);
-    if (!CheckPrimeProofOfWork(hashBlockHeader, nBits, mpzProbablePrime, nChainType, nChainLength))
+    if (!CheckPrimeProofOfWork(hashBlockHeader, nBits, bnProbablePrime, nChainType, nChainLength))
         return error("CheckProofOfWork() : check failed for prime proof-of-work");
     return true;
 }
@@ -4616,24 +4614,35 @@ void*  BitcoinMiner(void *pwallet_inst)
         unsigned int nTriedMultiplier = 0;
 
         // Primecoin: try to find hash divisible by primorial
-        mpz_class mpzHashFactor;
-        Primorial(nPrimorialHashFactor, mpzHashFactor);
-        
-        // mustyoshi's patch from https://bitcointalk.org/index.php?topic=251850.msg2689981#msg2689981
-        // with some gmp modifications
-        uint256 phash = pblock->GetHeaderHash();
+        unsigned int nHashFactor = PrimorialFast(nPrimorialHashFactor);
+
+        // Based on mustyoshi's patch from https://bitcointalk.org/index.php?topic=251850.msg2689981#msg2689981
+        uint256 phash;
         mpz_class mpzHash;
-        mpz_set_uint256(mpzHash.get_mpz_t(), phash);
-        
-        while ((phash < hashBlockHeaderLimit || (mpzHash % mpzHashFactor != 0)) && pblock->nNonce < 0xffff0000) {
-            pblock->nNonce++;
+        loop {
+            if (pblock->nNonce >= 0xffff0000)
+                break;
+
+            // Check that the hash meets the minimum
             phash = pblock->GetHeaderHash();
+            if (phash < hashBlockHeaderLimit) {
+                pblock->nNonce++;
+                continue;
+            }
+
+            // Check that the hash is divisible by the fixed primorial
             mpz_set_uint256(mpzHash.get_mpz_t(), phash);
+            if (!mpz_divisible_ui_p(mpzHash.get_mpz_t(), nHashFactor)) {
+                pblock->nNonce++;
+                continue;
+            }
+
+            // Use the hash that passed the tests
+            break;
         }
         if (pblock->nNonce >= 0xffff0000)
             continue;
         // Primecoin: primorial fixed multiplier
-        mpz_class mpzPrimorial;
         unsigned int nRoundTests = 0;
         unsigned int nRoundPrimesHit = 0;
         int64 nPrimeTimerStart = GetTimeMicros();
@@ -4651,7 +4660,23 @@ void*  BitcoinMiner(void *pwallet_inst)
             if (!PrimeTableGetPreviousPrime(nPrimorialMultiplier))
                 error("PrimecoinMiner() : primorial decrement overflow");
         }
+        mpz_class mpzPrimorial;
         Primorial(nPrimorialMultiplier, mpzPrimorial);
+
+        // Primecoin: adjust round primorial so that the generated prime candidates meet the minimum
+        mpz_class mpzMultiplierMin = mpzPrimeMin * nHashFactor / mpzHash + 1;
+        while (mpzPrimorial < mpzMultiplierMin)
+        {
+            if (!PrimeTableGetNextPrime(nPrimorialMultiplier))
+                error("PrimecoinMiner() : primorial minimum overflow");
+            Primorial(nPrimorialMultiplier, mpzPrimorial);
+        }
+        mpz_class mpzFixedMultiplier;
+        if (mpzPrimorial > nHashFactor) {
+            mpzFixedMultiplier = mpzPrimorial / nHashFactor;
+        } else {
+            mpzFixedMultiplier = 1;
+        }
 
         loop
         {
@@ -4659,23 +4684,9 @@ void*  BitcoinMiner(void *pwallet_inst)
             unsigned int nPrimesHit = 0;
             unsigned int nChainsHit = 0;
 
-            mpz_class mpzMultiplierMin = mpzPrimeMin * mpzHashFactor / mpzHash + 1;
-            while (mpzPrimorial < mpzMultiplierMin)
-            {
-                if (!PrimeTableGetNextPrime(nPrimorialMultiplier))
-                    error("PrimecoinMiner() : primorial minimum overflow");
-                Primorial(nPrimorialMultiplier, mpzPrimorial);
-            }
-            mpz_class mpzFixedMultiplier;
-            if (mpzPrimorial > mpzHashFactor) {
-                mpzFixedMultiplier = mpzPrimorial / mpzHashFactor;
-            } else {
-                mpzFixedMultiplier = 1;
-            }
-
             // Primecoin: mine for prime chain
             unsigned int nProbableChainLength;
-            if (MineProbablePrimeChain(*pblock, mpzFixedMultiplier, fNewBlock, nTriedMultiplier, nProbableChainLength, nTests, nPrimesHit, nChainsHit, mpzHash))
+            if (MineProbablePrimeChain(*pblock, mpzFixedMultiplier, fNewBlock, nTriedMultiplier, nProbableChainLength, nTests, nPrimesHit, nChainsHit, mpzHash, nPrimorialMultiplier))
             {
                 SetThreadPriority(THREAD_PRIORITY_NORMAL);
                 CheckWork(pblock, *pwalletMain, reservekey);
@@ -4720,7 +4731,7 @@ void*  BitcoinMiner(void *pwallet_inst)
                         double dPrimesPerMinute = 60000.0 * nPrimeCounter / (nMillisNow - nHPSTimerStart);
                         dPrimesPerSec = dPrimesPerMinute / 60.0;
                         double dTestsPerMinute = 60000.0 * nTestCounter / (nMillisNow - nHPSTimerStart);
-                        double dChainsPerMinute = 60000.0 * nChainCounter / (nMillisNow - nHPSTimerStart);
+                        dChainsPerMinute = 60000.0 * nChainCounter / (nMillisNow - nHPSTimerStart);
                         nHPSTimerStart = nMillisNow;
                         nPrimeCounter = 0;
                         nTestCounter = 0;
